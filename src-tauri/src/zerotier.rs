@@ -59,38 +59,64 @@ fn run_zerotier_command(args: &[&str]) -> Result<String, String> {
     }
 }
 
-fn parse_networks(output: &str) -> Vec<NetworkInfo> {
-    let mut networks = Vec::new();
-    for line in output.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 {
-            networks.push(NetworkInfo {
-                id: parts[0].to_string(),
-                name: parts[2..].join(" "),
-                status: parts[1].to_string(),
-                assigned_addresses: Vec::new(),
-            });
-        }
-    }
-    networks
+fn parse_networks_json(output: &str) -> Result<Vec<NetworkInfo>, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(output).map_err(|e| format!("Failed to parse networks JSON: {}", e))?;
+
+    let networks = json
+        .as_array()
+        .ok_or_else(|| "Invalid networks response".to_string())?;
+
+    Ok(networks
+        .iter()
+        .map(|n| NetworkInfo {
+            id: n["id"].as_str().unwrap_or("").to_string(),
+            name: n["name"].as_str().unwrap_or("").to_string(),
+            status: n["status"].as_str().unwrap_or("").to_string(),
+            assigned_addresses: n["assignedAddresses"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect())
 }
 
-fn parse_peers(output: &str) -> Vec<PeerInfo> {
-    let mut peers = Vec::new();
-    for line in output.lines().skip(2) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 6 {
-            peers.push(PeerInfo {
-                id: parts[0].to_string(),
-                address: parts[1].to_string(),
-                version: parts[2].to_string(),
-                latency: format!("{}ms", parts[3]),
-                paths: parts[4..].join(" "),
-                role: parts.last().unwrap_or(&"").to_string(),
-            });
-        }
-    }
-    peers
+fn parse_peers_json(output: &str) -> Result<Vec<PeerInfo>, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(output).map_err(|e| format!("Failed to parse peers JSON: {}", e))?;
+
+    let peers = json
+        .as_array()
+        .ok_or_else(|| "Invalid peers response".to_string())?;
+
+    Ok(peers
+        .iter()
+        .map(|p| {
+            let paths: Vec<String> = p["paths"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|path| path["address"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            PeerInfo {
+                id: p["address"].as_str().unwrap_or("").to_string(),
+                address: paths.first().cloned().unwrap_or_else(|| {
+                    p["address"].as_str().unwrap_or("").to_string()
+                }),
+                version: p["version"].as_str().unwrap_or("").to_string(),
+                latency: p["latency"].as_i64().unwrap_or(-1).to_string(),
+                paths: paths.join(", "),
+                role: p["role"].as_str().unwrap_or("").to_string(),
+            }
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -108,8 +134,8 @@ pub fn get_status() -> Result<ZtStatus, String> {
 
 #[tauri::command]
 pub fn list_networks() -> Result<Vec<NetworkInfo>, String> {
-    let output = run_zerotier_command(&["listnetworks"])?;
-    Ok(parse_networks(&output))
+    let output = run_zerotier_command(&["-j", "listnetworks"])?;
+    parse_networks_json(&output)
 }
 
 #[tauri::command]
@@ -124,28 +150,18 @@ pub fn leave_network(network_id: &str) -> Result<String, String> {
 
 #[tauri::command]
 pub fn list_peers() -> Result<Vec<PeerInfo>, String> {
-    let output = run_zerotier_command(&["listpeers"])?;
-    Ok(parse_peers(&output))
+    let output = run_zerotier_command(&["-j", "listpeers"])?;
+    parse_peers_json(&output)
 }
 
 #[tauri::command]
 pub fn get_network_info(network_id: &str) -> Result<NetworkInfo, String> {
-    let output = run_zerotier_command(&["-j", "listnetworks", network_id])?;
-    let json: serde_json::Value =
-        serde_json::from_str(&output).map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    let output = run_zerotier_command(&["-j", "listnetworks"])?;
+    let networks = parse_networks_json(&output)?;
 
-    let networks = json.as_array().cloned().unwrap_or_default();
     networks
-        .first()
-        .map(|n| NetworkInfo {
-            id: n["id"].as_str().unwrap_or("").to_string(),
-            name: n["name"].as_str().unwrap_or("").to_string(),
-            status: n["status"].as_str().unwrap_or("").to_string(),
-            assigned_addresses: n["assignedAddresses"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default(),
-        })
+        .into_iter()
+        .find(|n| n.id == network_id)
         .ok_or_else(|| "Network not found".to_string())
 }
 

@@ -5,10 +5,16 @@ interface Props {
 }
 
 function getLatencyColor(latency: string): string {
-  const ms = parseInt(latency.replace("ms", ""), 10);
+  const ms = parseInt(latency, 10);
+  if (isNaN(ms) || ms < 0) return "text-zinc-500";
   if (ms < 50) return "text-emerald-400";
   if (ms < 150) return "text-amber-400";
   return "text-red-400";
+}
+
+function formatLatency(latency: string): string {
+  const ms = parseInt(latency, 10);
+  return isNaN(ms) || ms < 0 ? "—" : `${ms}ms`;
 }
 
 function getRoleBadge(role: string): string {
@@ -55,11 +61,11 @@ export function PeerList({ peers }: Props) {
                   </span>
                 </div>
                 <span className={`text-xs font-mono ${getLatencyColor(peer.latency)}`}>
-                  {peer.latency}
+                  {formatLatency(peer.latency)}
                 </span>
               </div>
               <div className="text-xs text-zinc-500 font-mono mt-1.5 truncate">
-                {peer.id}
+                {peer.address}
               </div>
             </div>
           ))}

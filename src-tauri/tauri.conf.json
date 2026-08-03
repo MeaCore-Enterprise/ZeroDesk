@@ -38,7 +38,7 @@
     ],
     "linux": {
       "deb": {
-        "depends": ["zerotier-one", "polkit"]
+        "depends": ["zerotier-one", "pkexec"]
       }
     }
   }
