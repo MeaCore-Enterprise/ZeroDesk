@@ -26,11 +26,15 @@ pub struct ZtStatus {
     pub online: bool,
 }
 
+const ZEROTIER_CLI: &str = "/usr/sbin/zerotier-cli";
+const PKEXEC: &str = "/usr/bin/pkexec";
+const SYSTEMCTL: &str = "/usr/bin/systemctl";
+
 fn try_zerotier_command(elevated: bool, args: &[&str]) -> Result<String, String> {
     let (program, extra_args) = if elevated {
-        ("pkexec", vec!["zerotier-cli"])
+        (PKEXEC, vec![ZEROTIER_CLI])
     } else {
-        ("zerotier-cli", vec![])
+        (ZEROTIER_CLI, vec![])
     };
 
     let mut full_args: Vec<&str> = extra_args;
@@ -167,7 +171,7 @@ pub fn get_network_info(network_id: &str) -> Result<NetworkInfo, String> {
 
 #[tauri::command]
 pub fn is_service_running() -> Result<bool, String> {
-    let output = Command::new("systemctl")
+    let output = Command::new(SYSTEMCTL)
         .args(["is-active", "zerotier-one"])
         .output()
         .map_err(|e| format!("Failed to check service: {}", e))?;
@@ -176,8 +180,8 @@ pub fn is_service_running() -> Result<bool, String> {
 }
 
 fn run_systemctl(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("pkexec")
-        .args(["systemctl"])
+    let output = Command::new(PKEXEC)
+        .args([SYSTEMCTL])
         .args(args)
         .output()
         .map_err(|e| format!("Failed to execute systemctl: {}", e))?;
