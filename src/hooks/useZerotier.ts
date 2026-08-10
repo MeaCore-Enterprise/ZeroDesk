@@ -11,9 +11,7 @@ export function useZerotier() {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
+    const doFetch = async (): Promise<boolean> => {
       const [statusRes, networksRes, peersRes, serviceRes] = await Promise.allSettled([
         zerotier.getStatus(),
         zerotier.listNetworks(),
@@ -24,14 +22,36 @@ export function useZerotier() {
       if (statusRes.status === "fulfilled") setStatus(statusRes.value);
       if (networksRes.status === "fulfilled") setNetworks(networksRes.value);
       if (peersRes.status === "fulfilled") setPeers(peersRes.value);
-      if (serviceRes.status === "fulfilled") setServiceRunning(serviceRes.value);
+      const serviceRunningRes =
+        serviceRes.status === "fulfilled" && serviceRes.value === true;
+      setServiceRunning(serviceRunningRes);
 
-      const errors = [statusRes, networksRes, peersRes, serviceRes]
-        .filter((r) => r.status === "rejected")
+      if (!serviceRunningRes) {
+        setStatus(null);
+        setNetworks([]);
+        setPeers([]);
+      }
+
+      const errors = [statusRes, networksRes, peersRes]
+        .filter(
+          (r) => r.status === "rejected" && serviceRunningRes
+        )
         .map((r) => (r as PromiseRejectedResult).reason?.toString() || "Unknown error");
 
       if (errors.length > 0) {
         setError(errors[0]);
+        return false;
+      }
+      return true;
+    };
+
+    try {
+      setLoading(true);
+      setError(null);
+      const ok = await doFetch();
+      if (!ok) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await doFetch();
       }
     } catch (e) {
       setError(e?.toString() || "Failed to connect to ZeroTier");
