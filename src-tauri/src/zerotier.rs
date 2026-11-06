@@ -30,34 +30,93 @@ const ZEROTIER_CLI: &str = "/usr/sbin/zerotier-cli";
 const PKEXEC: &str = "/usr/bin/pkexec";
 const SYSTEMCTL: &str = "/usr/bin/systemctl";
 
-fn try_zerotier_command(elevated: bool, args: &[&str]) -> Result<String, String> {
-    let (program, extra_args) = if elevated {
-        (PKEXEC, vec![ZEROTIER_CLI])
-    } else {
-        (ZEROTIER_CLI, vec![])
-    };
-
-    let mut full_args: Vec<&str> = extra_args;
-    full_args.extend_from_slice(args);
-
-    let output = Command::new(program)
-        .args(&full_args)
+fn service_is_active() -> bool {
+    Command::new(SYSTEMCTL)
+        .args(["is-active", "zerotier-one"])
         .output()
-        .map_err(|e| format!("Failed to execute {}: {}", program, e))?;
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "active")
+        .unwrap_or(false)
+}
+
+fn run_zerotier_non_elevated(args: &[&str]) -> Result<String, String> {
+    let output = Command::new(ZEROTIER_CLI)
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to execute {}: {}", ZEROTIER_CLI, e))?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        Err(stderr)
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
 
-fn run_zerotier_command(args: &[&str]) -> Result<String, String> {
-    match try_zerotier_command(false, args) {
+fn run_zerotier_elevated(args: &[&str]) -> Result<String, String> {
+    let mut full_args: Vec<&str> = vec![ZEROTIER_CLI];
+    full_args.extend_from_slice(args);
+
+    let output = Command::new(PKEXEC)
+        .args(&full_args)
+        .output()
+        .map_err(|e| format!("Failed to execute {}: {}", PKEXEC, e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if !stderr.trim().is_empty() {
+            Err(stderr)
+        } else if !stdout.trim().is_empty() {
+            Err(stdout)
+        } else {
+            Err(format!(
+                "{} exited with status {:?}",
+                PKEXEC,
+                output.status.code()
+            ))
+        }
+    }
+}
+
+// Read-only commands: never start the service. Elevation is allowed as a
+// transparent fallback (passwordless via polkit rules) so reads work whether
+// or not the authtoken is readable by the user. Retries a few times because
+// the service reports "active" before the local API port is ready.
+fn read_zerotier(args: &[&str]) -> Result<String, String> {
+    if !service_is_active() {
+        return Err("ZeroTier service is not running".to_string());
+    }
+    let mut last_err = String::new();
+    for _ in 0..3 {
+        let res = match run_zerotier_non_elevated(args) {
+            Ok(out) => return Ok(out),
+            Err(e) if e.contains("authtoken.secret") || e.contains("Permission denied") => {
+                run_zerotier_elevated(args)
+            }
+            Err(e) => Err(e),
+        };
+        match res {
+            Ok(out) => return Ok(out),
+            Err(e) => {
+                last_err = e;
+                if last_err.contains("connection failed") {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    continue;
+                }
+                return Err(last_err);
+            }
+        }
+    }
+    Err(last_err)
+}
+
+// Mutating commands (user initiated): try as the user first, elevate only on permission errors.
+fn write_zerotier(args: &[&str]) -> Result<String, String> {
+    match run_zerotier_non_elevated(args) {
         Ok(out) => Ok(out),
         Err(e) if e.contains("authtoken.secret") || e.contains("Permission denied") => {
-            try_zerotier_command(true, args).map_err(|e2| format!("Command failed: {}", e2))
+            run_zerotier_elevated(args).map_err(|e2| format!("Command failed: {}", e2))
         }
         Err(e) => Err(format!("Command failed: {}", e)),
     }
@@ -125,7 +184,7 @@ fn parse_peers_json(output: &str) -> Result<Vec<PeerInfo>, String> {
 
 #[tauri::command]
 pub fn get_status() -> Result<ZtStatus, String> {
-    let output = run_zerotier_command(&["-j", "info"])?;
+    let output = read_zerotier(&["-j", "info"])?;
     let json: serde_json::Value =
         serde_json::from_str(&output).map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
@@ -138,29 +197,29 @@ pub fn get_status() -> Result<ZtStatus, String> {
 
 #[tauri::command]
 pub fn list_networks() -> Result<Vec<NetworkInfo>, String> {
-    let output = run_zerotier_command(&["-j", "listnetworks"])?;
+    let output = read_zerotier(&["-j", "listnetworks"])?;
     parse_networks_json(&output)
 }
 
 #[tauri::command]
 pub fn join_network(network_id: &str) -> Result<String, String> {
-    run_zerotier_command(&["join", network_id])
+    write_zerotier(&["join", network_id])
 }
 
 #[tauri::command]
 pub fn leave_network(network_id: &str) -> Result<String, String> {
-    run_zerotier_command(&["leave", network_id])
+    write_zerotier(&["leave", network_id])
 }
 
 #[tauri::command]
 pub fn list_peers() -> Result<Vec<PeerInfo>, String> {
-    let output = run_zerotier_command(&["-j", "listpeers"])?;
+    let output = read_zerotier(&["-j", "listpeers"])?;
     parse_peers_json(&output)
 }
 
 #[tauri::command]
 pub fn get_network_info(network_id: &str) -> Result<NetworkInfo, String> {
-    let output = run_zerotier_command(&["-j", "listnetworks"])?;
+    let output = read_zerotier(&["-j", "listnetworks"])?;
     let networks = parse_networks_json(&output)?;
 
     networks
@@ -171,12 +230,7 @@ pub fn get_network_info(network_id: &str) -> Result<NetworkInfo, String> {
 
 #[tauri::command]
 pub fn is_service_running() -> Result<bool, String> {
-    let output = Command::new(SYSTEMCTL)
-        .args(["is-active", "zerotier-one"])
-        .output()
-        .map_err(|e| format!("Failed to check service: {}", e))?;
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim() == "active")
+    Ok(service_is_active())
 }
 
 fn run_systemctl(args: &[&str]) -> Result<String, String> {
@@ -213,5 +267,5 @@ pub fn stop_service() -> Result<String, String> {
 #[tauri::command]
 pub fn toggle_autoconnect(network_id: &str, enabled: bool) -> Result<String, String> {
     let action = if enabled { "join" } else { "leave" };
-    run_zerotier_command(&[action, network_id])
+    write_zerotier(&[action, network_id])
 }

@@ -36,7 +36,12 @@ export function useZerotier() {
         .filter(
           (r) => r.status === "rejected" && serviceRunningRes
         )
-        .map((r) => (r as PromiseRejectedResult).reason?.toString() || "Unknown error");
+        .map((r) => {
+          const reason = (r as PromiseRejectedResult).reason;
+          if (typeof reason === "string" && reason.trim()) return reason;
+          if (reason instanceof Error && reason.message) return reason.message;
+          return "Unknown error";
+        });
 
       if (errors.length > 0) {
         setError(errors[0]);
@@ -54,7 +59,8 @@ export function useZerotier() {
         await doFetch();
       }
     } catch (e) {
-      setError(e?.toString() || "Failed to connect to ZeroTier");
+      const msg = e instanceof Error ? e.message : e?.toString();
+      setError(msg || "Failed to connect to ZeroTier");
     } finally {
       setLoading(false);
     }
